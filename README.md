@@ -82,9 +82,9 @@ intentionally unsupported.
 `EvaluateModelOnPoint(model, point_idx)` returns the squared residual for one
 data point. Models only need to be copyable by Python's standard `copy` module.
 
-Solvers may also provide an optional `LeastSquares(sample, model) -> Model`
+Solvers may also provide an optional `LeastSquares(sample, model) -> Model | None`
 method. If omitted, the least-squares refinement steps leave the input model
-unchanged.
+unchanged. Returning `None` is accepted and means no refinement was applied.
 
 This port intentionally avoids C++-style output parameters in user solver
 interfaces.
