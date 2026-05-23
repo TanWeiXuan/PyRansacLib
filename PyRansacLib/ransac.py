@@ -87,6 +87,7 @@ class LocallyOptimizedMSAC(RansacBase):
 
         sampler = self.sampler_cls(options.random_seed_, solver)
         rng = random.Random(options.random_seed_)
+        least_squares = getattr(solver, "LeastSquares", None)
         max_num_iterations = max(
             int(options.max_num_iterations_), int(options.min_num_iterations_)
         )
@@ -108,6 +109,7 @@ class LocallyOptimizedMSAC(RansacBase):
                     rng,
                     best_model,
                     statistics.best_model_score,
+                    least_squares,
                 )
                 self._update_statistics(
                     statistics,
@@ -129,7 +131,10 @@ class LocallyOptimizedMSAC(RansacBase):
                 continue
 
             best_local_score, best_local_model_id = self.GetBestEstimatedModelId(
-                solver, estimated_models, squared_inlier_threshold
+                solver,
+                estimated_models,
+                squared_inlier_threshold,
+                best_min_model_score,
             )
 
             if (
@@ -164,6 +169,7 @@ class LocallyOptimizedMSAC(RansacBase):
                             rng,
                             best_minimal_model,
                             best_min_model_score,
+                            least_squares,
                         )
                         best_model, statistics.best_model_score = (
                             self.UpdateBestModel(
@@ -201,6 +207,7 @@ class LocallyOptimizedMSAC(RansacBase):
                 rng,
                 best_model,
                 statistics.best_model_score,
+                least_squares,
             )
             self._update_statistics(
                 statistics,
@@ -216,9 +223,14 @@ class LocallyOptimizedMSAC(RansacBase):
             and statistics.inlier_indices
         ):
             refined_model = self._call_least_squares(
-                solver, statistics.inlier_indices, best_model
+                least_squares, statistics.inlier_indices, best_model
             )
-            score = self.ScoreModel(solver, refined_model, squared_inlier_threshold)
+            score = self._score_model_bounded(
+                solver,
+                refined_model,
+                squared_inlier_threshold,
+                statistics.best_model_score,
+            )
             if score < statistics.best_model_score:
                 statistics.best_model_score = score
                 best_model = refined_model
@@ -232,11 +244,16 @@ class LocallyOptimizedMSAC(RansacBase):
 
         return best_model, statistics
 
-    def GetBestEstimatedModelId(self, solver, models, squared_inlier_threshold):
+    def GetBestEstimatedModelId(
+        self, solver, models, squared_inlier_threshold, max_score=math.inf
+    ):
         best_score = math.inf
         best_model_id = 0
         for model_index, model in enumerate(models):
-            score = self.ScoreModel(solver, model, squared_inlier_threshold)
+            score_bound = min(best_score, max_score)
+            score = self._score_model_bounded(
+                solver, model, squared_inlier_threshold, score_bound
+            )
             if score < best_score:
                 best_score = score
                 best_model_id = model_index
@@ -246,9 +263,12 @@ class LocallyOptimizedMSAC(RansacBase):
 
     def ScoreModel(self, solver, model, squared_inlier_threshold):
         score = 0.0
-        for point_index in range(int(solver.num_data())):
-            squared_error = solver.EvaluateModelOnPoint(model, point_index)
-            score += self.ComputeScore(squared_error, squared_inlier_threshold)
+        num_data = int(solver.num_data())
+        threshold = float(squared_inlier_threshold)
+        evaluate = solver.EvaluateModelOnPoint
+        for point_index in range(num_data):
+            squared_error = float(evaluate(model, point_index))
+            score += squared_error if squared_error < threshold else threshold
         return score
 
     score_model = ScoreModel
@@ -260,15 +280,23 @@ class LocallyOptimizedMSAC(RansacBase):
 
     def GetInliers(self, solver, model, squared_inlier_threshold):
         inliers = []
-        for point_index in range(int(solver.num_data())):
-            squared_error = solver.EvaluateModelOnPoint(model, point_index)
-            if squared_error < squared_inlier_threshold:
+        num_data = int(solver.num_data())
+        threshold = float(squared_inlier_threshold)
+        evaluate = solver.EvaluateModelOnPoint
+        for point_index in range(num_data):
+            squared_error = evaluate(model, point_index)
+            if squared_error < threshold:
                 inliers.append(point_index)
         return inliers
 
     get_inliers = GetInliers
 
-    def LocalOptimization(self, options, solver, rng, initial_model, initial_score):
+    def LocalOptimization(
+        self, options, solver, rng, initial_model, initial_score, least_squares=None
+    ):
+        if least_squares is None:
+            least_squares = getattr(solver, "LeastSquares", None)
+
         num_data = int(solver.num_data())
         min_non_min_sample_size = int(solver.non_minimal_sample_size())
         if min_non_min_sample_size > num_data:
@@ -287,13 +315,17 @@ class LocallyOptimizedMSAC(RansacBase):
             solver,
             rng,
             best_model,
+            least_squares,
         )
-        least_squares_score = self.ScoreModel(
-            solver, least_squares_model, squared_inlier_threshold
+        least_squares_score = self._score_model_bounded(
+            solver, least_squares_model, squared_inlier_threshold, best_score
         )
         best_model, best_score = self.UpdateBestModel(
             least_squares_score, least_squares_model, best_score, best_model
         )
+
+        if int(options.num_lo_steps_) <= 0:
+            return best_model, best_score
 
         inliers_base = self.GetInliers(
             solver,
@@ -320,15 +352,20 @@ class LocallyOptimizedMSAC(RansacBase):
             if non_min_model is None:
                 continue
 
-            non_min_score = self.ScoreModel(
-                solver, non_min_model, squared_inlier_threshold
+            non_min_score = self._score_model_bounded(
+                solver, non_min_model, squared_inlier_threshold, best_score
             )
             best_model, best_score = self.UpdateBestModel(
                 non_min_score, non_min_model, best_score, best_model
             )
 
             non_min_model = self.LeastSquaresFit(
-                options, squared_inlier_threshold, solver, rng, non_min_model
+                options,
+                squared_inlier_threshold,
+                solver,
+                rng,
+                non_min_model,
+                least_squares,
             )
 
             threshold = threshold_multiplier * squared_inlier_threshold
@@ -343,10 +380,15 @@ class LocallyOptimizedMSAC(RansacBase):
 
             for _ in range(int(options.num_lsq_iterations_)):
                 non_min_model = self.LeastSquaresFit(
-                    options, threshold, solver, rng, non_min_model
+                    options,
+                    threshold,
+                    solver,
+                    rng,
+                    non_min_model,
+                    least_squares,
                 )
-                non_min_score = self.ScoreModel(
-                    solver, non_min_model, squared_inlier_threshold
+                non_min_score = self._score_model_bounded(
+                    solver, non_min_model, squared_inlier_threshold, best_score
                 )
                 best_model, best_score = self.UpdateBestModel(
                     non_min_score, non_min_model, best_score, best_model
@@ -357,7 +399,12 @@ class LocallyOptimizedMSAC(RansacBase):
 
     local_optimization = LocalOptimization
 
-    def LeastSquaresFit(self, options, thresh, solver, rng, model):
+    def LeastSquaresFit(self, options, thresh, solver, rng, model, least_squares=None):
+        if least_squares is None:
+            least_squares = getattr(solver, "LeastSquares", None)
+        if least_squares is None:
+            return model
+
         lsq_sample_size = (
             int(options.min_sample_multiplicator_) * int(solver.min_sample_size())
         )
@@ -367,7 +414,7 @@ class LocallyOptimizedMSAC(RansacBase):
 
         lsq_data_size = min(lsq_sample_size, len(inliers))
         utils.RandomShuffleAndResize(lsq_data_size, rng, inliers)
-        return self._call_least_squares(solver, inliers, model)
+        return self._call_least_squares(least_squares, inliers, model)
 
     least_squares_fit = LeastSquaresFit
 
@@ -402,10 +449,23 @@ class LocallyOptimizedMSAC(RansacBase):
             raise TypeError("MinimalSolver(sample) must return a list of models")
         return models
 
-    def _call_least_squares(self, solver, sample, model):
-        if not hasattr(solver, "LeastSquares"):
+    def _score_model_bounded(self, solver, model, squared_inlier_threshold, max_score):
+        score = 0.0
+        num_data = int(solver.num_data())
+        threshold = float(squared_inlier_threshold)
+        cutoff = float(max_score)
+        evaluate = solver.EvaluateModelOnPoint
+        for point_index in range(num_data):
+            squared_error = float(evaluate(model, point_index))
+            score += squared_error if squared_error < threshold else threshold
+            if score >= cutoff:
+                return score
+        return score
+
+    def _call_least_squares(self, least_squares, sample, model):
+        if least_squares is None:
             return model
-        refined_model = solver.LeastSquares(sample, self._copy_model(model))
+        refined_model = least_squares(sample, self._copy_model(model))
         return model if refined_model is None else self._copy_model(refined_model)
 
     def _copy_model(self, model):

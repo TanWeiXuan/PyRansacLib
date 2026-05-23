@@ -115,5 +115,45 @@ class UtilityAndSamplerTest(unittest.TestCase):
         self.assertLessEqual(iterations, 100)
 
 
+class CountingScoreSolver:
+    def __init__(self, squared_errors):
+        self.squared_errors = list(squared_errors)
+        self.num_evaluations = 0
+
+    def num_data(self):
+        return len(self.squared_errors)
+
+    def EvaluateModelOnPoint(self, model, point_idx):
+        self.num_evaluations += 1
+        return self.squared_errors[point_idx]
+
+    def reset_count(self):
+        self.num_evaluations = 0
+
+
+class BoundedScoringTest(unittest.TestCase):
+    def test_bounded_scoring_can_stop_before_exact_scoring(self):
+        solver = CountingScoreSolver([1.0] * 20)
+        ransac = LocallyOptimizedMSAC()
+
+        exact_score = ransac.ScoreModel(
+            solver, model="candidate", squared_inlier_threshold=10.0
+        )
+        exact_evaluations = solver.num_evaluations
+
+        solver.reset_count()
+        bounded_score = ransac._score_model_bounded(
+            solver,
+            model="candidate",
+            squared_inlier_threshold=10.0,
+            max_score=5.0,
+        )
+
+        self.assertEqual(exact_score, 20.0)
+        self.assertEqual(exact_evaluations, solver.num_data())
+        self.assertGreaterEqual(bounded_score, 5.0)
+        self.assertLess(solver.num_evaluations, exact_evaluations)
+
+
 if __name__ == "__main__":
     unittest.main()
