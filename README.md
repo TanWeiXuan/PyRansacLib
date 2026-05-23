@@ -43,8 +43,8 @@ options = LORansacOptions(
 best_model, statistics = LocallyOptimizedMSAC().estimate_model(options, solver)
 ```
 
-See `tests/test_line_fitting.py` for a complete dependency-free line-fitting
-solver and example usage.
+See `tests/test_line_fitting.py` and `tests/test_plane_fitting.py` for complete
+dependency-free solver examples.
 
 ## Solver Protocol
 
